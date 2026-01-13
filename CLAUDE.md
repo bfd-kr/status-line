@@ -45,9 +45,11 @@ Credentials are detected in the following priority order:
 ## Dependencies
 
 - `curl` - for API requests (required)
-- `jq` - for JSON parsing (required)
 - `bc` - for floating point math (required, usually pre-installed)
-- Bash 4+ (for associative arrays and modern features)
+- `jq` - for JSON parsing (optional, but recommended)
+  - If not installed, falls back to grep/sed parsing
+  - The fallback is less robust but works for standard API responses
+- Bash 3.2+ (macOS default is sufficient)
 
 ## Usage
 
@@ -108,7 +110,8 @@ status-line/
 ├── status-line            # Main executable script
 ├── plans/                 # Implementation plans
 │   └── status-line-rewrite.md
-└── README.md              # User documentation (TODO)
+└── test/
+    └── test-formats.sh    # Format output tests
 ```
 
 ## Integration with Claude Code

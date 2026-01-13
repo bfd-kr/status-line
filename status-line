@@ -33,6 +33,13 @@ COLOR_YELLOW=$'\033[33m'
 COLOR_RED=$'\033[31m'
 COLOR_RESET=$'\033[0m'
 
+# Check for jq availability (cache result for performance)
+if command -v jq &>/dev/null; then
+    HAS_JQ=true
+else
+    HAS_JQ=false
+fi
+
 #######################################
 # Print error message and exit
 # Arguments:
@@ -43,6 +50,84 @@ COLOR_RESET=$'\033[0m'
 die() {
     echo "error: $1" >&2
     exit 1
+}
+
+#######################################
+# Extract a simple value from JSON using grep/sed
+# Only works for simple top-level or one-level nested keys
+# Arguments:
+#   $1 - JSON string
+#   $2 - Key path (e.g., "spend" or "user_info.spend")
+# Returns:
+#   Extracted value (unquoted)
+#######################################
+json_extract() {
+    local json="$1"
+    local key="$2"
+
+    if [[ "$HAS_JQ" == true ]]; then
+        echo "$json" | jq -r ".$key // empty" 2>/dev/null
+    else
+        # Fallback: use grep/sed for simple extraction
+        # Handle nested keys like "user_info.spend"
+        if [[ "$key" == *.* ]]; then
+            # Nested key - extract parent object first, then child
+            local parent="${key%%.*}"
+            local child="${key#*.}"
+            # This is fragile but works for simple cases
+            echo "$json" | grep -o "\"$child\"[[:space:]]*:[[:space:]]*[^,}]*" | head -1 | sed 's/.*:[[:space:]]*//; s/"//g; s/[[:space:]]*$//'
+        else
+            # Simple key
+            echo "$json" | grep -o "\"$key\"[[:space:]]*:[[:space:]]*[^,}]*" | head -1 | sed 's/.*:[[:space:]]*//; s/"//g; s/[[:space:]]*$//'
+        fi
+    fi
+}
+
+#######################################
+# Check if JSON has a specific key
+# Arguments:
+#   $1 - JSON string
+#   $2 - Key to check
+# Returns:
+#   0 if key exists, 1 otherwise
+#######################################
+json_has_key() {
+    local json="$1"
+    local key="$2"
+
+    if [[ "$HAS_JQ" == true ]]; then
+        echo "$json" | jq -e "has(\"$key\")" &>/dev/null
+    else
+        # Fallback: simple grep check
+        echo "$json" | grep -q "\"$key\""
+    fi
+}
+
+#######################################
+# Extract value from settings file
+# Arguments:
+#   $1 - File path
+#   $2 - Key name
+# Returns:
+#   Value or empty string
+#######################################
+extract_setting() {
+    local file="$1"
+    local key="$2"
+
+    if [[ ! -f "$file" ]]; then
+        return
+    fi
+
+    if [[ "$HAS_JQ" == true ]]; then
+        jq -r --arg key "$key" '.env[$key] // .[$key] // empty' "$file" 2>/dev/null
+    else
+        # Fallback: grep for the key in the file
+        # Check env object first, then root level
+        local value
+        value=$(grep -o "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$file" 2>/dev/null | head -1 | sed 's/.*:[[:space:]]*"//; s/"$//')
+        echo "$value"
+    fi
 }
 
 #######################################
@@ -77,6 +162,12 @@ The script also reads from Claude settings files:
   - \$project_dir/.claude/settings.local.json
   - \$project_dir/.claude/settings.json
   - ~/.claude/settings.json
+
+Dependencies:
+  curl      Required for API requests
+  jq        Optional but recommended for reliable JSON parsing
+            Falls back to grep/sed if not available
+  bc        Required for percentage calculation
 EOF
 }
 
@@ -128,23 +219,6 @@ parse_args() {
 }
 
 #######################################
-# Extract value from JSON settings file
-# Arguments:
-#   $1 - File path
-#   $2 - Key name
-# Returns:
-#   Value or empty string
-#######################################
-extract_setting() {
-    local file="$1"
-    local key="$2"
-
-    if [[ -f "$file" ]]; then
-        jq -r --arg key "$key" '.env[$key] // .[$key] // empty' "$file" 2>/dev/null
-    fi
-}
-
-#######################################
 # Find all .claude directories walking up from project_dir
 # Arguments:
 #   $1 - Starting directory
@@ -179,7 +253,7 @@ detect_credentials() {
     # Read stdin if available (Claude Code passes project info via stdin)
     if [[ ! -t 0 ]]; then
         stdin_data=$(cat)
-        project_dir=$(echo "$stdin_data" | jq -r '.workspace.project_dir // empty' 2>/dev/null)
+        project_dir=$(json_extract "$stdin_data" "workspace.project_dir")
     fi
 
     # Check settings files in order
@@ -315,7 +389,16 @@ get_cached_response() {
 #   0 if valid JSON, 1 otherwise
 #######################################
 is_valid_json() {
-    echo "$1" | jq empty 2>/dev/null
+    local str="$1"
+
+    if [[ "$HAS_JQ" == true ]]; then
+        echo "$str" | jq empty 2>/dev/null
+    else
+        # Fallback: basic check - starts with { or [ and ends with } or ]
+        str="${str#"${str%%[![:space:]]*}"}"  # trim leading whitespace
+        str="${str%"${str##*[![:space:]]}"}"  # trim trailing whitespace
+        [[ "$str" =~ ^\{.*\}$ || "$str" =~ ^\[.*\]$ ]]
+    fi
 }
 
 #######################################
@@ -502,14 +585,20 @@ format_output() {
             echo "$output"
             ;;
         json)
-            jq -n \
-                --argjson spend "$spend" \
-                --argjson budget "$budget" \
-                --argjson percent "$pct_float" \
-                --arg key "$key_alias" \
-                --arg scope "$scope" \
-                --argjson days "${days:-0}" \
-                '{spend: $spend, budget: $budget, percent: $percent, key: $key, scope: $scope, days_until_reset: $days}'
+            if [[ "$HAS_JQ" == true ]]; then
+                jq -n \
+                    --argjson spend "$spend" \
+                    --argjson budget "$budget" \
+                    --argjson percent "$pct_float" \
+                    --arg key "$key_alias" \
+                    --arg scope "$scope" \
+                    --argjson days "${days:-0}" \
+                    '{spend: $spend, budget: $budget, percent: $percent, key: $key, scope: $scope, days_until_reset: $days}'
+            else
+                # Manual JSON construction
+                printf '{"spend":%s,"budget":%s,"percent":%s,"key":"%s","scope":"%s","days_until_reset":%s}\n' \
+                    "$spend" "$budget" "$pct_float" "$key_alias" "$scope" "${days:-0}"
+            fi
             ;;
     esac
 }
@@ -525,9 +614,7 @@ main() {
         die "curl is required but not installed"
     fi
 
-    if ! command -v jq &>/dev/null; then
-        die "jq is required but not installed"
-    fi
+    # Note: jq is optional - we have fallbacks for grep/sed
 
     # Detect credentials
     if ! detect_credentials; then
@@ -576,19 +663,24 @@ main() {
     fi
 
     # Parse response - check if it's a user response or error
-    local has_user_info is_error
-    read -r has_user_info is_error < <(echo "$response" | jq -r '[has("user_info"), has("error")] | @tsv')
-
     local spend budget reset_at key_alias scope_label
 
-    if [[ "$has_user_info" == "true" && "$is_error" != "true" ]]; then
-        # User key response
-        local key_suffix="${API_KEY: -4}"
+    if json_has_key "$response" "user_info" && ! json_has_key "$response" "error"; then
+        # User key response - extract user_info fields
+        spend=$(json_extract "$response" "user_info.spend")
+        budget=$(json_extract "$response" "user_info.max_budget")
+        reset_at=$(json_extract "$response" "user_info.budget_reset_at")
 
-        read -r spend budget reset_at key_alias < <(echo "$response" | jq -r --arg suffix "$key_suffix" \
-            '[.user_info.spend, .user_info.max_budget, .user_info.budget_reset_at,
-              (.keys[] | select(.key_name | endswith($suffix)) | .key_alias) //
-              (.keys[] | select(.key_name | endswith($suffix)) | .key_name) // ""] | @tsv')
+        # Try to find key alias matching our key suffix
+        local key_suffix="${API_KEY: -4}"
+        if [[ "$HAS_JQ" == true ]]; then
+            key_alias=$(echo "$response" | jq -r --arg suffix "$key_suffix" \
+                '(.keys[] | select(.key_name | endswith($suffix)) | .key_alias) //
+                 (.keys[] | select(.key_name | endswith($suffix)) | .key_name) // ""' 2>/dev/null)
+        else
+            # Fallback: just try to extract any key_alias
+            key_alias=$(json_extract "$response" "key_alias")
+        fi
 
         scope_label="user"
     else
@@ -616,8 +708,11 @@ main() {
         fi
 
         # Parse team response
-        read -r spend budget reset_at key_alias < <(echo "$response" | jq -r \
-            '[.info.spend, .info.max_budget, .info.budget_reset_at, .info.key_alias // .info.key_name // ""] | @tsv')
+        spend=$(json_extract "$response" "info.spend")
+        budget=$(json_extract "$response" "info.max_budget")
+        reset_at=$(json_extract "$response" "info.budget_reset_at")
+        key_alias=$(json_extract "$response" "info.key_alias")
+        [[ -z "$key_alias" ]] && key_alias=$(json_extract "$response" "info.key_name")
 
         scope_label="team"
     fi
