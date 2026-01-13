@@ -38,7 +38,7 @@ Credentials are detected in the following priority order:
 |--------|---------|
 | `minimal` | `45/100 (45%)` |
 | `money` | `$45/$100 (45%)` |
-| `bar` | `[████████░░] 45%` |
+| `bar` | `[████░░░░░░] 45%` |
 | `full` | `🟢 KrAIG 💰 (key-name \| user): 45.2% ($45 of $100) \| 15 days` |
 | `emoji` | `🟢😺💰` / `🟡🙀💰` / `🔴😿💰` |
 | `json` | `{"spend":45,"budget":100,"percent":45,"key":"...","scope":"user","days_until_reset":15}` |

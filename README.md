@@ -58,7 +58,7 @@ chmod u+x ~/.claude/status-line
 
 # Progress bar
 ~/.claude/status-line -f bar
-# Output: [████████░░] 45%
+# Output: [████░░░░░░] 45%
 
 # Emoji only (with cat faces!)
 ~/.claude/status-line -f emoji
@@ -134,7 +134,7 @@ Add to `~/.claude/settings.json`:
 | `full` | 🟢 KrAIG 💰 (key-name \| user): 45.2% ($45 of $100) \| 15 days |
 | `minimal` | 45/100 (45%) |
 | `money` | $45/$100 (45%) |
-| `bar` | [████████░░] 45% |
+| `bar` | [████░░░░░░] 45% |
 | `emoji` | 🟢😺💰 / 🟡🙀💰 / 🔴😿💰 |
 | `json` | {"spend":45,"budget":100,"percent":45,...} |
 
