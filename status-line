@@ -1,0 +1,653 @@
+#!/bin/bash
+#
+# status-line - KrAIG Budget Status Line for Claude Code
+# Displays monthly budget usage with configurable output formats
+#
+# Usage: status-line [OPTIONS]
+#
+# Options:
+#   -f, --format FORMAT    Output format: minimal|money|bar|full|json (default: full)
+#   -k, --hide-key         Hide key name in output
+#   -d, --hide-days        Hide days until reset
+#   -c, --no-color         Disable color output
+#   -t, --cache-ttl SECS   Cache TTL in seconds (default: 60)
+#   -h, --help             Show this help message
+#   -v, --version          Show version
+
+set -o pipefail
+
+VERSION="1.0.0"
+SCRIPT_NAME="status-line"
+
+# Default configuration
+FORMAT="full"
+SHOW_KEY_NAME=true
+SHOW_DAYS=true
+USE_COLOR=true
+CACHE_TTL=60
+DEFAULT_API_URL="https://ai-model-proxy.aks-ur-prd-internal.8451.cloud"
+
+# Color codes
+COLOR_GREEN=$'\033[32m'
+COLOR_YELLOW=$'\033[33m'
+COLOR_RED=$'\033[31m'
+COLOR_RESET=$'\033[0m'
+
+#######################################
+# Print error message and exit
+# Arguments:
+#   $1 - Error message
+# Returns:
+#   Exits with code 1
+#######################################
+die() {
+    echo "error: $1" >&2
+    exit 1
+}
+
+#######################################
+# Print help message
+#######################################
+show_help() {
+    cat << EOF
+Usage: $SCRIPT_NAME [OPTIONS]
+
+A minimal shell utility to check your KrAIG API usage and budget status.
+
+Options:
+  -f, --format FORMAT    Output format (default: full)
+                         minimal  - 45/100 (45%)
+                         money    - \$45/\$100 (45%)
+                         bar      - [████░░░░░░] 45%
+                         full     - Emoji + key name + percentage + days
+                         json     - {"spend":45,"budget":100,"percent":45}
+  -k, --hide-key         Hide key name in output
+  -d, --hide-days        Hide days until reset
+  -c, --no-color         Disable color output
+  -t, --cache-ttl SECS   Cache TTL in seconds (default: 60)
+  -h, --help             Show this help message
+  -v, --version          Show version ($VERSION)
+
+Environment Variables:
+  KRAIG_API_KEY          API key (highest priority)
+  KRAIG_API_URL          API URL (highest priority)
+  ANTHROPIC_API_KEY      Fallback API key
+
+The script also reads from Claude settings files:
+  - \$project_dir/.claude/settings.local.json
+  - \$project_dir/.claude/settings.json
+  - ~/.claude/settings.json
+EOF
+}
+
+#######################################
+# Parse command line arguments
+#######################################
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -f|--format)
+                FORMAT="$2"
+                shift 2
+                ;;
+            -k|--hide-key)
+                SHOW_KEY_NAME=false
+                shift
+                ;;
+            -d|--hide-days)
+                SHOW_DAYS=false
+                shift
+                ;;
+            -c|--no-color)
+                USE_COLOR=false
+                shift
+                ;;
+            -t|--cache-ttl)
+                CACHE_TTL="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -v|--version)
+                echo "$SCRIPT_NAME $VERSION"
+                exit 0
+                ;;
+            *)
+                die "Unknown option: $1. Use --help for usage."
+                ;;
+        esac
+    done
+
+    # Validate format
+    case $FORMAT in
+        minimal|money|bar|full|json) ;;
+        *) die "Invalid format: $FORMAT. Valid options: minimal, money, bar, full, json" ;;
+    esac
+}
+
+#######################################
+# Extract value from JSON settings file
+# Arguments:
+#   $1 - File path
+#   $2 - Key name
+# Returns:
+#   Value or empty string
+#######################################
+extract_setting() {
+    local file="$1"
+    local key="$2"
+
+    if [[ -f "$file" ]]; then
+        jq -r --arg key "$key" '.env[$key] // .[$key] // empty' "$file" 2>/dev/null
+    fi
+}
+
+#######################################
+# Find all .claude directories walking up from project_dir
+# Arguments:
+#   $1 - Starting directory
+# Returns:
+#   List of .claude directories (one per line)
+#######################################
+find_claude_dirs() {
+    local dir="$1"
+
+    while [[ "$dir" != "/" && "$dir" != "." && -n "$dir" ]]; do
+        if [[ -d "$dir/.claude" ]]; then
+            echo "$dir/.claude"
+        fi
+        dir=$(dirname "$dir")
+    done
+}
+
+#######################################
+# Detect API credentials from env vars and settings files
+# Sets: API_KEY
+#######################################
+detect_credentials() {
+    # Priority 1: KRAIG_API_KEY env var
+    if [[ -n "$KRAIG_API_KEY" ]]; then
+        API_KEY="$KRAIG_API_KEY"
+        return 0
+    fi
+
+    # Priority 2: Settings files (walk up directory tree)
+    local stdin_data project_dir
+
+    # Read stdin if available (Claude Code passes project info via stdin)
+    if [[ ! -t 0 ]]; then
+        stdin_data=$(cat)
+        project_dir=$(echo "$stdin_data" | jq -r '.workspace.project_dir // empty' 2>/dev/null)
+    fi
+
+    # Check settings files in order
+    local settings_files=()
+
+    if [[ -n "$project_dir" ]]; then
+        while IFS= read -r claude_dir; do
+            settings_files+=("$claude_dir/settings.local.json")
+            settings_files+=("$claude_dir/settings.json")
+        done < <(find_claude_dirs "$project_dir")
+    fi
+
+    settings_files+=("$HOME/.claude/settings.local.json")
+    settings_files+=("$HOME/.claude/settings.json")
+
+    for settings_file in "${settings_files[@]}"; do
+        if [[ -f "$settings_file" ]]; then
+            local key
+            key=$(extract_setting "$settings_file" "ANTHROPIC_AUTH_TOKEN")
+            if [[ -n "$key" ]]; then
+                API_KEY="$key"
+
+                # Also check for API URL while we're here
+                if [[ -z "$API_URL" ]]; then
+                    local url
+                    url=$(extract_setting "$settings_file" "ANTHROPIC_BASE_URL")
+                    if [[ -n "$url" ]]; then
+                        API_URL="${url%/}/user/info"
+                    fi
+                fi
+                return 0
+            fi
+        fi
+    done
+
+    # Priority 3: ANTHROPIC_API_KEY env var (fallback)
+    if [[ -n "$ANTHROPIC_API_KEY" ]]; then
+        API_KEY="$ANTHROPIC_API_KEY"
+        return 0
+    fi
+
+    return 1
+}
+
+#######################################
+# Detect API URL from env vars and settings
+# Sets: API_URL
+#######################################
+detect_api_url() {
+    # Already set from detect_credentials?
+    if [[ -n "$API_URL" ]]; then
+        return 0
+    fi
+
+    # Priority 1: KRAIG_API_URL env var
+    if [[ -n "$KRAIG_API_URL" ]]; then
+        API_URL="$KRAIG_API_URL"
+        # Ensure it ends with proper path
+        if [[ ! "$API_URL" =~ /user/info$ && ! "$API_URL" =~ /key/info$ ]]; then
+            API_URL="${API_URL%/}/user/info"
+        fi
+        return 0
+    fi
+
+    # Priority 2: ANTHROPIC_BASE_URL env var
+    if [[ -n "$ANTHROPIC_BASE_URL" ]]; then
+        API_URL="${ANTHROPIC_BASE_URL%/}/user/info"
+        return 0
+    fi
+
+    # Priority 3: Default
+    API_URL="${DEFAULT_API_URL}/user/info"
+}
+
+#######################################
+# Get MD5 hash (cross-platform)
+# Arguments:
+#   $1 - String to hash
+# Returns:
+#   MD5 hash string
+#######################################
+get_hash() {
+    if command -v md5 &>/dev/null; then
+        echo -n "$1" | md5
+    elif command -v md5sum &>/dev/null; then
+        echo -n "$1" | md5sum | cut -d' ' -f1
+    else
+        # Fallback: use last 8 chars of key
+        echo "${1: -8}"
+    fi
+}
+
+#######################################
+# Get cached response if fresh
+# Arguments:
+#   $1 - Cache file path
+# Returns:
+#   Cached response or empty string
+#######################################
+get_cached_response() {
+    local cache_file="$1"
+
+    if [[ -f "$cache_file" ]]; then
+        local cache_age now_epoch file_epoch
+        now_epoch=$(date +%s)
+
+        # Get file modification time (cross-platform)
+        if stat --version &>/dev/null 2>&1; then
+            # GNU stat
+            file_epoch=$(stat -c %Y "$cache_file" 2>/dev/null)
+        else
+            # BSD stat (macOS)
+            file_epoch=$(stat -f %m "$cache_file" 2>/dev/null)
+        fi
+
+        if [[ -n "$file_epoch" ]]; then
+            cache_age=$((now_epoch - file_epoch))
+            if [[ $cache_age -lt $CACHE_TTL ]]; then
+                cat "$cache_file"
+                return 0
+            fi
+        fi
+    fi
+
+    return 1
+}
+
+#######################################
+# Check if string is valid JSON
+# Arguments:
+#   $1 - String to check
+# Returns:
+#   0 if valid JSON, 1 otherwise
+#######################################
+is_valid_json() {
+    echo "$1" | jq empty 2>/dev/null
+}
+
+#######################################
+# Fetch response from API
+# Arguments:
+#   $1 - API URL
+# Returns:
+#   API response JSON
+#######################################
+fetch_api_response() {
+    local url="$1"
+
+    curl -s --max-time 10 -X GET "$url" \
+        -H "Authorization: Bearer ${API_KEY}" \
+        -H "Content-Type: application/json" \
+        2>/dev/null
+}
+
+#######################################
+# Calculate days until reset from ISO 8601 timestamp
+# Arguments:
+#   $1 - Reset date (ISO 8601)
+# Returns:
+#   Number of days (minimum 1 if time remaining, 0 if past)
+#######################################
+calculate_days_until() {
+    local reset_date="$1"
+
+    # Normalize: convert +00:00 to Z
+    reset_date="${reset_date%+00:00}Z"
+
+    local reset_epoch
+
+    # Parse date (cross-platform)
+    if date --version &>/dev/null 2>&1; then
+        # GNU date
+        reset_epoch=$(date -d "$reset_date" +%s 2>/dev/null)
+    else
+        # BSD date (macOS)
+        reset_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$reset_date" +%s 2>/dev/null)
+    fi
+
+    if [[ -z "$reset_epoch" || "$reset_epoch" == "null" ]]; then
+        echo "0"
+        return
+    fi
+
+    local now_epoch diff_seconds days
+    now_epoch=$(date +%s)
+    diff_seconds=$((reset_epoch - now_epoch))
+
+    if [[ $diff_seconds -le 0 ]]; then
+        echo "0"
+        return
+    fi
+
+    days=$((diff_seconds / 86400))
+
+    # Round up: if less than 1 day but > 0, return 1
+    if [[ $days -eq 0 ]]; then
+        echo "1"
+    else
+        echo "$days"
+    fi
+}
+
+#######################################
+# Get color and emoji based on percentage
+# Arguments:
+#   $1 - Percentage (integer)
+# Sets: COLOR, EMOJI
+#######################################
+get_status_indicators() {
+    local pct="$1"
+
+    if [[ $pct -lt 75 ]]; then
+        COLOR="$COLOR_GREEN"
+        EMOJI="🟢"
+    elif [[ $pct -lt 90 ]]; then
+        COLOR="$COLOR_YELLOW"
+        EMOJI="🟡"
+    else
+        COLOR="$COLOR_RED"
+        EMOJI="🔴"
+    fi
+
+    if [[ "$USE_COLOR" != true ]]; then
+        COLOR=""
+        COLOR_RESET_ACTUAL=""
+    else
+        COLOR_RESET_ACTUAL="$COLOR_RESET"
+    fi
+}
+
+#######################################
+# Generate progress bar
+# Arguments:
+#   $1 - Percentage (integer)
+#   $2 - Width (default: 10)
+# Returns:
+#   Progress bar string
+#######################################
+generate_bar() {
+    local pct="$1"
+    local width="${2:-10}"
+
+    local filled=$((pct * width / 100))
+    local empty=$((width - filled))
+
+    # Clamp values
+    [[ $filled -lt 0 ]] && filled=0
+    [[ $filled -gt $width ]] && filled=$width
+    [[ $empty -lt 0 ]] && empty=0
+
+    local bar="["
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    bar+="]"
+
+    echo "$bar"
+}
+
+#######################################
+# Format output based on selected format
+# Arguments:
+#   $1 - Spend amount
+#   $2 - Max budget
+#   $3 - Percentage (float)
+#   $4 - Key alias
+#   $5 - Scope label (user/team)
+#   $6 - Days until reset
+#######################################
+format_output() {
+    local spend="$1"
+    local budget="$2"
+    local pct_float="$3"
+    local key_alias="$4"
+    local scope="$5"
+    local days="$6"
+
+    local pct_int spend_int budget_int
+    pct_int=$(printf "%.0f" "$pct_float")
+    spend_int=$(printf "%.0f" "$spend")
+    budget_int=$(printf "%.0f" "$budget")
+
+    get_status_indicators "$pct_int"
+
+    case $FORMAT in
+        minimal)
+            echo "${spend_int}/${budget_int} (${pct_int}%)"
+            ;;
+        money)
+            echo "\$${spend_int}/\$${budget_int} (${pct_int}%)"
+            ;;
+        bar)
+            local bar
+            bar=$(generate_bar "$pct_int")
+            echo "${COLOR}${bar} ${pct_int}%${COLOR_RESET_ACTUAL}"
+            ;;
+        full)
+            local output=""
+            local pct_formatted
+            pct_formatted=$(printf "%.1f" "$pct_float")
+
+            output="${COLOR}${EMOJI} KrAIG 💰"
+
+            if [[ "$SHOW_KEY_NAME" == true && -n "$key_alias" && "$key_alias" != "null" ]]; then
+                output+=" (${key_alias} | ${scope})"
+            else
+                output+=" (${scope})"
+            fi
+
+            output+=": ${pct_formatted}% (\$${spend_int} of \$${budget_int})"
+
+            if [[ "$SHOW_DAYS" == true && -n "$days" && "$days" != "0" ]]; then
+                if [[ "$days" == "1" ]]; then
+                    output+=" | ${days} day until reset"
+                else
+                    output+=" | ${days} days until reset"
+                fi
+            fi
+
+            output+="${COLOR_RESET_ACTUAL}"
+            echo "$output"
+            ;;
+        json)
+            jq -n \
+                --argjson spend "$spend" \
+                --argjson budget "$budget" \
+                --argjson percent "$pct_float" \
+                --arg key "$key_alias" \
+                --arg scope "$scope" \
+                --argjson days "${days:-0}" \
+                '{spend: $spend, budget: $budget, percent: $percent, key: $key, scope: $scope, days_until_reset: $days}'
+            ;;
+    esac
+}
+
+#######################################
+# Main function
+#######################################
+main() {
+    parse_args "$@"
+
+    # Check for required dependencies
+    if ! command -v curl &>/dev/null; then
+        die "curl is required but not installed"
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        die "jq is required but not installed"
+    fi
+
+    # Detect credentials
+    if ! detect_credentials; then
+        echo "❌ No API key found"
+        exit 0
+    fi
+
+    # Detect API URL
+    detect_api_url
+
+    # Setup cache
+    local cache_dir="${TMPDIR:-/tmp}/status-line-cache"
+    mkdir -p "$cache_dir" 2>/dev/null
+    local key_hash
+    key_hash=$(get_hash "$API_KEY")
+    local cache_file="$cache_dir/$key_hash"
+
+    # Try to get cached response
+    local response
+    response=$(get_cached_response "$cache_file")
+
+    # If no cache, fetch from API
+    if [[ -z "$response" ]]; then
+        response=$(fetch_api_response "$API_URL")
+
+        if [[ -z "$response" ]]; then
+            echo "❌ API Error"
+            exit 0
+        fi
+
+        # Only cache if it's valid JSON
+        if is_valid_json "$response"; then
+            echo "$response" > "$cache_file" 2>/dev/null
+        else
+            echo "❌ API Error: $response"
+            exit 0
+        fi
+    fi
+
+    # Validate cached response is valid JSON
+    if ! is_valid_json "$response"; then
+        # Clear bad cache and retry
+        rm -f "$cache_file" 2>/dev/null
+        echo "❌ Invalid cached response, please retry"
+        exit 0
+    fi
+
+    # Parse response - check if it's a user response or error
+    local has_user_info is_error
+    read -r has_user_info is_error < <(echo "$response" | jq -r '[has("user_info"), has("error")] | @tsv')
+
+    local spend budget reset_at key_alias scope_label
+
+    if [[ "$has_user_info" == "true" && "$is_error" != "true" ]]; then
+        # User key response
+        local key_suffix="${API_KEY: -4}"
+
+        read -r spend budget reset_at key_alias < <(echo "$response" | jq -r --arg suffix "$key_suffix" \
+            '[.user_info.spend, .user_info.max_budget, .user_info.budget_reset_at,
+              (.keys[] | select(.key_name | endswith($suffix)) | .key_alias) //
+              (.keys[] | select(.key_name | endswith($suffix)) | .key_name) // ""] | @tsv')
+
+        scope_label="user"
+    else
+        # Try team key endpoint
+        local team_url="${API_URL/user\/info/key\/info}"
+        local team_cache="$cache_file.team"
+
+        response=$(get_cached_response "$team_cache")
+
+        if [[ -z "$response" ]]; then
+            response=$(fetch_api_response "$team_url")
+
+            if [[ -z "$response" ]]; then
+                echo "❌ API Error"
+                exit 0
+            fi
+
+            # Only cache if it's valid JSON
+            if is_valid_json "$response"; then
+                echo "$response" > "$team_cache" 2>/dev/null
+            else
+                echo "❌ API Error: $response"
+                exit 0
+            fi
+        fi
+
+        # Parse team response
+        read -r spend budget reset_at key_alias < <(echo "$response" | jq -r \
+            '[.info.spend, .info.max_budget, .info.budget_reset_at, .info.key_alias // .info.key_name // ""] | @tsv')
+
+        scope_label="team"
+    fi
+
+    # Validate response
+    if [[ -z "$spend" || "$spend" == "null" || ! "$spend" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        echo "❌ Invalid Response"
+        exit 0
+    fi
+
+    if [[ -z "$budget" || "$budget" == "null" || ! "$budget" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        echo "❌ Invalid Response"
+        exit 0
+    fi
+
+    # Calculate percentage
+    local percentage
+    percentage=$(echo "scale=4; ($spend / $budget) * 100" | bc)
+
+    # Calculate days until reset
+    local days_until=""
+    if [[ -n "$reset_at" && "$reset_at" != "null" ]]; then
+        days_until=$(calculate_days_until "$reset_at")
+    fi
+
+    # Format and output
+    format_output "$spend" "$budget" "$percentage" "$key_alias" "$scope_label" "$days_until"
+}
+
+# Run main only if not being sourced
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
