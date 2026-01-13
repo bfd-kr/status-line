@@ -60,6 +60,12 @@ chmod u+x ~/.claude/status-line
 ~/.claude/status-line -f bar
 # Output: [████████░░] 45%
 
+# Emoji only (with cat faces!)
+~/.claude/status-line -f emoji
+# Output: 🟢😺💰 (happy cat at <75%)
+# Output: 🟡🙀💰 (surprised cat at 75-89%)
+# Output: 🔴😿💰 (crying cat at >=90%)
+
 # JSON (for scripting)
 ~/.claude/status-line -f json
 # Output: {"spend":45,"budget":100,"percent":45.2,...}
@@ -129,6 +135,7 @@ Add to `~/.claude/settings.json`:
 | `minimal` | 45/100 (45%) |
 | `money` | $45/$100 (45%) |
 | `bar` | [████████░░] 45% |
+| `emoji` | 🟢😺💰 / 🟡🙀💰 / 🔴😿💰 |
 | `json` | {"spend":45,"budget":100,"percent":45,...} |
 
 ## Color Thresholds

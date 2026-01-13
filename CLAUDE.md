@@ -8,7 +8,7 @@ This project provides a lightweight shell command that:
 - Queries the KrAIG API to retrieve monthly billing/usage information
 - Auto-detects the user's API URL and key from environment variables and Claude settings files
 - Calculates and displays cost spent and percentage of budget used to date
-- Supports multiple output formats (minimal, money, bar, full, json)
+- Supports multiple output formats (minimal, money, bar, full, emoji, json)
 
 ## Key Detection Strategy
 
@@ -40,6 +40,7 @@ Credentials are detected in the following priority order:
 | `money` | `$45/$100 (45%)` |
 | `bar` | `[████████░░] 45%` |
 | `full` | `🟢 KrAIG 💰 (key-name \| user): 45.2% ($45 of $100) \| 15 days` |
+| `emoji` | `🟢😺💰` / `🟡🙀💰` / `🔴😿💰` |
 | `json` | `{"spend":45,"budget":100,"percent":45,"key":"...","scope":"user","days_until_reset":15}` |
 
 ## Dependencies

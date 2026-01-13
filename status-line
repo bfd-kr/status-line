@@ -6,7 +6,7 @@
 # Usage: status-line [OPTIONS]
 #
 # Options:
-#   -f, --format FORMAT    Output format: minimal|money|bar|full|json (default: full)
+#   -f, --format FORMAT    Output format: minimal|money|bar|full|emoji|json (default: full)
 #   -k, --hide-key         Hide key name in output
 #   -d, --hide-days        Hide days until reset
 #   -c, --no-color         Disable color output
@@ -145,6 +145,7 @@ Options:
                          money    - \$45/\$100 (45%)
                          bar      - [████░░░░░░] 45%
                          full     - Emoji + key name + percentage + days
+                         emoji    - 🟢😺💰 (emojis with cat faces)
                          json     - {"spend":45,"budget":100,"percent":45}
   -k, --hide-key         Hide key name in output
   -d, --hide-days        Hide days until reset
@@ -213,8 +214,8 @@ parse_args() {
 
     # Validate format
     case $FORMAT in
-        minimal|money|bar|full|json) ;;
-        *) die "Invalid format: $FORMAT. Valid options: minimal, money, bar, full, json" ;;
+        minimal|money|bar|full|emoji|json) ;;
+        *) die "Invalid format: $FORMAT. Valid options: minimal, money, bar, full, emoji, json" ;;
     esac
 }
 
@@ -477,12 +478,15 @@ get_status_indicators() {
     if [[ $pct -lt 75 ]]; then
         COLOR="$COLOR_GREEN"
         EMOJI="🟢"
+        CAT_EMOJI="😺"  # Happy cat - everything is fine
     elif [[ $pct -lt 90 ]]; then
         COLOR="$COLOR_YELLOW"
         EMOJI="🟡"
+        CAT_EMOJI="🙀"  # Surprised cat - getting worried
     else
         COLOR="$COLOR_RED"
         EMOJI="🔴"
+        CAT_EMOJI="😿"  # Crying cat - oh no
     fi
 
     if [[ "$USE_COLOR" != true ]]; then
@@ -552,6 +556,9 @@ format_output() {
             ;;
         money)
             echo "\$${spend_int}/\$${budget_int} (${pct_int}%)"
+            ;;
+        emoji)
+            echo "${EMOJI}${CAT_EMOJI}💰"
             ;;
         bar)
             local bar
